@@ -1,148 +1,237 @@
-// routes/userRoutes.js
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const User = require('../models/User');
-const { authMiddleware } = require('../middleware/auth'); // Some JWT auth
-const upload = multer({ dest: 'uploads/' }); // or configure as you like
-
-// Upload or update profile picture
+const { authMiddleware } = require('../middleware/auth');
+const upload = multer({ dest: 'uploads/' });
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const { sendVerificationEmail } = require('../utils/email');
 
 router.get('/me', authMiddleware, async (req, res) => {
-    try {
-      const user = await User.findById(req.user.id);
-      if (!user) {
-        return res.status(404).send('User not found');
-      }
-  
-      // Return only the fields you want
-      res.json({
-        username: user.username,
-        profilePicture: user.profilePicture,
-        gallery: user.gallery,
-      });
-    } catch (error) {
-      console.error('Error fetching user data:', error);
-      res.status(500).send('Internal server error');
-    }
-  });
-
-
-  router.get('/search', async (req, res) => {
-    try {
-      // e.g. /search?query=john
-      const { query } = req.query;
-      if (!query) {
-        return res.status(400).send('No search query provided');
-      }
-  
-      // Case-insensitive partial match on username
-      const users = await User.find({
-        username: { $regex: query, $options: 'i' },
-      });
-  
-      // Return a minimal set of fields
-      // e.g., username + profilePicture, or entire doc. Up to you:
-      const results = users.map(user => ({
-        _id: user._id,
-        username: user.username,
-        profilePicture: user.profilePicture,
-        // etc. – you can decide how much public info to show
-      }));
-  
-      res.json(results);
-    } catch (error) {
-      console.error(error);
-      res.status(500).send('Error searching users');
-    }
-  });
-
-
-router.post('/profile-picture', authMiddleware, upload.single('image'), async (req, res) => {
   try {
-    // 1. The user is identified by req.user.id (from JWT)
     const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).send('User not found');
-    console.log('req.file:', req.file);
-    console.log('req.user:', req.user);
-    // 2. Upload new image to Cloudinary
-    const filePath = req.file.path; // multer-saved path
-    const uploadResult = await cloudinary.uploader.upload(filePath, {
-      folder: 'profile_pictures', // optional folder name in Cloudinary
-    });
+    if (!user) {
+      return res.status(404).send('User not found');
+    }
 
-    // 3. Optionally remove old image if you want:
-    /* if (user.profilePicture) {
-      const publicId = extractPublicId(user.profilePicture);
-      await cloudinary.uploader.destroy(publicId);
-    } */
-
-    // 4. Update user document
-    user.profilePicture = uploadResult.secure_url;
-    await user.save();
-
-    // 5. Return updated user info
     res.json({
-      message: 'Profile picture updated successfully',
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
       profilePicture: user.profilePicture,
+      gallery: user.gallery,
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).send('Error uploading profile picture');
+    console.error('Error fetching user data:', error);
+    res.status(500).send('Internal server error');
   }
 });
 
-// routes/userRoutes.js (continuing)
-router.post('/gallery', authMiddleware, upload.array('images', 10), async (req, res) => {
-    try {
-      const user = await User.findById(req.user.id);
-      if (!user) return res.status(404).send('User not found');
-  
-      const fileUploads = req.files.map(file => {
-        return cloudinary.uploader.upload(file.path, {
-          folder: 'art_gallery', // optional folder in Cloudinary
-        });
-      });
-  
-      // Wait for all uploads to finish
-      const uploadResults = await Promise.all(fileUploads);
-  
-      // Push new Cloudinary URLs into the gallery array
-      uploadResults.forEach(result => {
-        user.gallery.push(result.secure_url);
-      });
-  
-      await user.save();
-  
-      res.json({
-        message: 'Gallery updated successfully',
-        gallery: user.gallery,
-      });
-    } catch (error) {
-      console.error(error);
-      res.status(500).send('Error uploading gallery images');
+// Login Route
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ email });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).send('Invalid credentials');
     }
-  });
-  
-  router.get('/:username', async (req, res) => {
-    try {
-      const { username } = req.params;
-      const user = await User.findOne({ username });
-      if (!user) {
-        return res.status(404).send('User not found');
-      }
-  
-      // Return only public fields
-      res.json({
-        username: user.username,
-        profilePicture: user.profilePicture,
-        gallery: user.gallery,
-      });
-    } catch (error) {
-      console.error(error);
-      res.status(500).send('Error fetching user profile');
+    if (!user.isVerified) {
+      return res.status(403).send('Please verify your email before logging in');
     }
-  });
-  
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(400).send('Error logging in');
+  }
+});
+
+// Register Route
+router.post('/register', async (req, res) => {
+  const { firstName, lastName, email, password } = req.body;
+
+  if (!firstName || !lastName || !email || !password) {
+    return res.status(400).send('All fields are required');
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+
+    const user = new User({
+      firstName,
+      lastName,
+      email,
+      password: hashedPassword,
+      verificationToken,
+      isVerified: false,
+    });
+
+    await user.save();
+    await sendVerificationEmail(email, verificationToken);
+
+    res.status(201).send('Registration successful! Please check your email to verify your account.');
+  } catch (error) {
+    console.error('Registration error:', error);
+    if (error.code === 11000) {
+      if (error.keyPattern?.email) return res.status(400).send('Email already registered');
+    }
+    res.status(500).send('Error registering user');
+  }
+});
+
+// Email verification route
+router.get('/verify', async (req, res) => {
+  const { token } = req.query;
+  try {
+    const user = await User.findOne({ verificationToken: token });
+    if (!user) return res.status(400).send('Invalid or expired verification token');
+
+    user.isVerified = true;
+    user.verificationToken = undefined;
+    await user.save();
+
+    const jwtToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    res.redirect(`http://localhost:3000/login?verified=true&token=${jwtToken}`);
+  } catch (error) {
+    console.error('Verification error:', error);
+    res.status(500).send('Server error during verification');
+  }
+});
+
+// Resend verification email
+router.post('/resend-verification', async (req, res) => {
+  const { email } = req.body;
+  try {
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).send('User not found');
+    if (user.isVerified) return res.status(400).send('User is already verified');
+
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    user.verificationToken = verificationToken;
+    await user.save();
+
+    await sendVerificationEmail(email, verificationToken);
+    res.send('Verification email resent');
+  } catch (error) {
+    console.error('Resend verification error:', error);
+    res.status(500).send('Error resending verification email');
+  }
+});
+
+// Upload profile picture and replace existing one if present
+router.post('/profile-picture', upload.single('image'), authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).send('User not found');
+
+    // If user already has a profile picture on Cloudinary, delete it
+    if (user.profilePicture) {
+      const publicId = user.profilePicture.split('/').pop().split('.')[0];
+      await cloudinary.uploader.destroy(publicId);
+    }
+
+    const uploaded = await cloudinary.uploader.upload(req.file.path);
+    user.profilePicture = uploaded.secure_url;
+    await user.save();
+
+    res.status(200).json({ profilePicture: uploaded.secure_url });
+  } catch (error) {
+    console.error('Error uploading profile picture:', error);
+    res.status(500).send('Failed to upload profile picture');
+  }
+});
+
+// Upload images to cloudinary
+router.post('/gallery', upload.array('images'), authMiddleware, async (req, res) => {
+  try {
+    const { widths, heights, prices, tags } = req.body;
+
+    const widthArray = Array.isArray(widths) ? widths : [widths];
+    const heightArray = Array.isArray(heights) ? heights : [heights];
+    const priceArray = Array.isArray(prices) ? prices : [prices];
+    const tagArray = Array.isArray(tags) ? tags : [tags];
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).send('User not found');
+
+    const uploadedImages = await Promise.all(req.files.map(file =>
+      cloudinary.uploader.upload(file.path)
+    ));
+
+    uploadedImages.forEach((upload, i) => {
+      user.gallery.push({
+        url: upload.secure_url,
+        width: parseInt(widthArray[i]),
+        height: parseInt(heightArray[i]),
+        price: parseFloat(priceArray[i]),
+        artistName: `${user.firstName} ${user.lastName}`,
+        tags: [tagArray[i]],
+      });
+    });
+
+    await user.save();
+    res.status(201).send('Gallery updated!');
+  } catch (error) {
+    console.error('Gallery upload error:', error);
+    res.status(500).send('Failed to upload gallery images');
+  }
+});
+
+router.delete('/gallery', authMiddleware, async (req, res) => {
+  try {
+    const { images } = req.body;
+    if (!images || !Array.isArray(images)) {
+      return res.status(400).send('No images provided for deletion');
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).send('User not found');
+
+    user.gallery = user.gallery.filter(painting => !images.includes(painting.url));
+    await user.save();
+
+    res.status(200).send('Selected images deleted');
+  } catch (error) {
+    console.error('Error deleting images:', error);
+    res.status(500).send('Failed to delete images');
+  }
+});
+
+// Search logic
+router.get('/search', async (req, res) => {
+  try {
+    const { query } = req.query;
+    if (!query) return res.status(400).send('Missing search query');
+
+    const users = await User.find({
+      $or: [
+        { firstName: { $regex: query, $options: 'i' } },
+        { lastName: { $regex: query, $options: 'i' } },
+        { email: { $regex: query, $options: 'i' } },
+        { 'gallery.tags': { $regex: query, $options: 'i' } },
+      ]
+    }).select('firstName lastName profilePicture gallery');
+
+    res.json(users);
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).send('Error performing search');
+  }
+});
+
+// Public profile id
+router.get('/public/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password -verificationToken');
+    if (!user) return res.status(404).send('User not found');
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Error loading public profile');
+  }
+});
 module.exports = router;
