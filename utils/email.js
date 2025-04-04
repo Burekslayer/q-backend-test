@@ -35,7 +35,7 @@ async function sendVerificationEmail(to, token) {
   console.log('📤 Sending email to:', to);
 
   const transporter = await setupTransporter();
-  const verificationLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${token}`;
+  const verificationLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify?token=${token}`;
 
   const info = await transporter.sendMail({
     from: '"Kreativni Univerzum" <no-reply@kreativni.univerzum.com>',
