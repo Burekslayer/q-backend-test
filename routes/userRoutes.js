@@ -95,7 +95,7 @@ router.get('/verify', async (req, res) => {
     await user.save();
 
     const jwtToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.redirect(`http://localhost:3000/login?verified=true&token=${jwtToken}`);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?verified=true&token=${jwtToken}`);
   } catch (error) {
     console.error('Verification error:', error);
     res.status(500).send('Server error during verification');
