@@ -6,7 +6,9 @@ const paintingSchema = new mongoose.Schema({
   height: { type: Number, required: true },
   artistName: { type: String, required: true },
   price: { type: Number, required: true },
-  tags: { type: [String], default: [] }
+  tags: { type: [String], default: [] },
+  isImportant: { type: Boolean, default: false },       // ✅ NEW
+  importantIndex: { type: Number, default: null },
 });
 
 const userSchema = new mongoose.Schema({

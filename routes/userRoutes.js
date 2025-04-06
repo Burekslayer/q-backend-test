@@ -170,6 +170,8 @@ router.post('/gallery', upload.array('images'), authMiddleware, async (req, res)
         price: parseFloat(priceArray[i]),
         artistName: `${user.firstName} ${user.lastName}`,
         tags: [tagArray[i]],
+        isImportant: false,
+        importantIndex: null,
       });
     });
 
@@ -181,6 +183,37 @@ router.post('/gallery', upload.array('images'), authMiddleware, async (req, res)
   }
 });
 
+// Add important tags to Gallery Images
+router.patch('/gallery/important', authMiddleware, async (req, res) => {
+  const { url, isImportant } = req.body;
+  if (typeof url !== 'string' || typeof isImportant !== 'boolean') {
+    return res.status(400).send('Invalid input');
+  }
+
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).send('User not found');
+
+    const image = user.gallery.find(img => img.url === url);
+    if (!image) return res.status(404).send('Image not found');
+
+    if (isImportant) {
+      const currentCount = user.gallery.filter(img => img.isImportant).length;
+      if (currentCount >= 3) return res.status(400).send('Maximum 3 important images allowed');
+      image.isImportant = true;
+      image.importantIndex = currentCount;
+    } else {
+      image.isImportant = false;
+      image.importantIndex = null;
+    }
+
+    await user.save();
+    res.send('Image importance updated');
+  } catch (error) {
+    console.error('Error updating importance:', error);
+    res.status(500).send('Server error');
+  }
+});
 router.delete('/gallery', authMiddleware, async (req, res) => {
   try {
     const { images } = req.body;
@@ -232,6 +265,17 @@ router.get('/public/:id', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).send('Error loading public profile');
+  }
+});
+
+// Get users information for gallery setup
+router.get('/all', async (req, res) => {
+  try {
+    const users = await User.find({}, 'firstName lastName gallery');
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).send('Server error');
   }
 });
 module.exports = router;
