@@ -19,6 +19,11 @@ cloudinary.config({
 
 app.use('/api/orders', orderRoutes);
 app.use('/api/users', userRoutes);
+app.get('/', (req, res) => {
+  res
+    .status(200)
+    .send('🎉 Backend is up & running! 🎉');
+});
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
