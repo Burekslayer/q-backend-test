@@ -4,6 +4,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const userRoutes = require('./routes/userRoutes');
+const orderRoutes = require('./routes/orderRoutes');
 
 const app = express();
 app.use(express.json());
@@ -16,6 +17,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+app.use('/api/orders', orderRoutes);
 app.use('/api/users', userRoutes);
 
 mongoose.connect(process.env.MONGO_URI)

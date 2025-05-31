@@ -9,6 +9,29 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { sendVerificationEmail } = require('../utils/email');
+const sharp = require('sharp')
+
+// Helper: convert raw 0–255 RGB into {h:0–360, s,l}
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s, l = (max + min) / 2;
+  if (max === min) {
+    h = 0; s = 0;
+  } else {
+    const d = max - min;
+    s = l > 0.5
+      ? d / (2 - max - min)
+      : d / (max + min);
+    switch (max) {
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)); break;
+      case g: h = ((b - r) / d + 2);               break;
+      case b: h = ((r - g) / d + 4);               break;
+    }
+    h /= 6;
+  }
+  return { h: h * 360, s, l };
+}
 
 router.get('/me', authMiddleware, async (req, res) => {
   try {
@@ -23,6 +46,7 @@ router.get('/me', authMiddleware, async (req, res) => {
       email: user.email,
       profilePicture: user.profilePicture,
       gallery: user.gallery,
+      profileTheme: user.profileTheme,
     });
   } catch (error) {
     console.error('Error fetching user data:', error);
@@ -145,8 +169,29 @@ router.post('/profile-picture', upload.single('image'), authMiddleware, async (r
   }
 });
 
+//Update profile page colors
+router.patch('/profile-theme', authMiddleware, async (req, res) => {
+  const { theme } = req.body;
+
+  if (!['default', 'dark', 'pastel'].includes(theme)) {
+    return res.status(400).send('Invalid theme');
+  }
+
+  try {
+    const user = await User.findById(req.user.id);
+    user.profileTheme = theme;
+    await user.save();
+    res.send({ message: 'Theme updated', theme });
+  } catch (err) {
+    console.error('Theme update error:', err);
+    res.status(500).send('Server error');
+  }
+});
+
 // Upload images to cloudinary
 router.post('/gallery', upload.array('images'), authMiddleware, async (req, res) => {
+  console.log('Received gallery upload request');
+  console.log('Files:', req.files); // or req.file depending on multer setup
   try {
     const { widths, heights, prices, tags } = req.body;
 
@@ -158,20 +203,38 @@ router.post('/gallery', upload.array('images'), authMiddleware, async (req, res)
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).send('User not found');
 
-    const uploadedImages = await Promise.all(req.files.map(file =>
-      cloudinary.uploader.upload(file.path)
-    ));
+    const uploadedImages = await Promise.all(
+      req.files.map(file => cloudinary.uploader.upload(file.path))
+    );
+    
+    // 2) In parallel, shrink each file to a single pixel and read its RGB
 
+    const hueValues = await Promise.all(
+      req.files.map(file =>
+        sharp(file.path)
+          .resize(1, 1)        // collapse to one pixel (average color)
+          .raw()               // get raw bytes
+          .toBuffer({ resolveWithObject: true })
+          .then(({ data }) => {
+            const [r, g, b] = data;
+            const { h } = rgbToHsl(r, g, b);
+            return Math.round(h);
+          })
+      )
+    );
+
+    console.log("Hue values: ", hueValues)
     uploadedImages.forEach((upload, i) => {
       user.gallery.push({
         url: upload.secure_url,
-        width: parseInt(widthArray[i]),
-        height: parseInt(heightArray[i]),
+        width: upload.width,                               //parseInt(widthArray[i])
+        height: upload.height,                             //parseInt(heightArray[i]),
         price: parseFloat(priceArray[i]),
         artistName: `${user.firstName} ${user.lastName}`,
         tags: [tagArray[i]],
         isImportant: false,
         importantIndex: null,
+        averageHue: hueValues[i]
       });
     });
 
@@ -214,6 +277,7 @@ router.patch('/gallery/important', authMiddleware, async (req, res) => {
     res.status(500).send('Server error');
   }
 });
+
 router.delete('/gallery', authMiddleware, async (req, res) => {
   try {
     const { images } = req.body;
@@ -259,14 +323,22 @@ router.get('/search', async (req, res) => {
 // Public profile id
 router.get('/public/:id', async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password -verificationToken');
+    const user = await User.findById(req.params.id);
     if (!user) return res.status(404).send('User not found');
-    res.json(user);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Error loading public profile');
+
+    res.json({
+      firstName: user.firstName,
+      lastName: user.lastName,
+      profilePicture: user.profilePicture,
+      profileTheme: user.profileTheme,       // ✅ NEW
+      gallery: user.gallery || []
+    });
+  } catch (error) {
+    console.error('Error fetching public profile:', error);
+    res.status(500).send('Server error');
   }
 });
+
 
 // Get users information for gallery setup
 router.get('/all', async (req, res) => {
@@ -278,4 +350,42 @@ router.get('/all', async (req, res) => {
     res.status(500).send('Server error');
   }
 });
+
+// GET /api/users/gallery/nearest?hue=123&count=24
+router.get('/gallery/nearest', async (req, res) => {
+  try {
+    const clickedHue = parseInt(req.query.hue, 10);
+    if (isNaN(clickedHue)) {
+      return res.status(400).send('Missing or invalid hue');
+    }
+    // default to 24 closest by hue
+    const count = parseInt(req.query.count, 10) || 24;
+
+    const matches = await User.aggregate([
+      { $unwind: '$gallery' },
+      { $addFields: {
+          'gallery.diff': {
+            $let: {
+              vars: {
+                d: { $abs: { $subtract: ['$gallery.averageHue', clickedHue] } }
+              },
+              in: { $min: ['$$d', { $subtract: [360, '$$d'] }] }
+            }
+          }
+        }
+      },
+      { $sort: { 'gallery.diff': 1 } },
+      { $limit: count },
+      { $replaceRoot: { newRoot: '$gallery' } }
+    ]);
+
+    res.json(matches);
+  } catch (err) {
+    console.error('Error fetching nearest images:', err);
+    res.status(500).send('Server error');
+  }
+});
+
+
+
 module.exports = router;

@@ -9,6 +9,7 @@ const paintingSchema = new mongoose.Schema({
   tags: { type: [String], default: [] },
   isImportant: { type: Boolean, default: false },       // ✅ NEW
   importantIndex: { type: Number, default: null },
+  averageHue: { type: Number, required: true },
 });
 
 const userSchema = new mongoose.Schema({
@@ -20,6 +21,7 @@ const userSchema = new mongoose.Schema({
   gallery: { type: [paintingSchema], default: [] },
   isVerified: { type: Boolean, default: false },
   verificationToken: { type: String }, // will be a UUID or random string
+  profileTheme: { type: String, default: 'default'} // ✅ NEW
 });
 
 module.exports = mongoose.model('User', userSchema);
