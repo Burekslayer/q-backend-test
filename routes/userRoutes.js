@@ -3,10 +3,10 @@ const router = express.Router();
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const User = require('../models/User');
-const { authMiddleware } = require('../middleware/auth');
 const upload = multer({ dest: 'uploads/' });
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const { authMiddleware } = require('../middleware/auth');
+const { attachMongoUser } = require('../middleware/attachMongoUser');
 const crypto = require('crypto');
 const { sendVerificationEmail } = require('../utils/email');
 const sharp = require('sharp')
@@ -33,7 +33,7 @@ function rgbToHsl(r, g, b) {
   return { h: h * 360, s, l };
 }
 
-router.get('/me', authMiddleware, async (req, res) => {
+router.get('/me', authMiddleware, attachMongoUser, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) {
@@ -47,6 +47,7 @@ router.get('/me', authMiddleware, async (req, res) => {
       profilePicture: user.profilePicture,
       gallery: user.gallery,
       profileTheme: user.profileTheme,
+      profileCover: user.profileCover,
     });
   } catch (error) {
     console.error('Error fetching user data:', error);
@@ -54,100 +55,8 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 });
 
-// Login Route
-router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
-  try {
-    const user = await User.findOne({ email });
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(401).send('Invalid credentials');
-    }
-    if (!user.isVerified) {
-      return res.status(403).send('Please verify your email before logging in');
-    }
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(400).send('Error logging in');
-  }
-});
-
-// Register Route
-router.post('/register', async (req, res) => {
-  const { firstName, lastName, email, password } = req.body;
-
-  if (!firstName || !lastName || !email || !password) {
-    return res.status(400).send('All fields are required');
-  }
-
-  try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-
-    const user = new User({
-      firstName,
-      lastName,
-      email,
-      password: hashedPassword,
-      verificationToken,
-      isVerified: false,
-    });
-
-    await user.save();
-    await sendVerificationEmail(email, verificationToken);
-
-    res.status(201).send('Registration successful! Please check your email to verify your account.');
-  } catch (error) {
-    console.error('Registration error:', error);
-    if (error.code === 11000) {
-      if (error.keyPattern?.email) return res.status(400).send('Email already registered');
-    }
-    res.status(500).send('Error registering user');
-  }
-});
-
-// Email verification route
-router.get('/verify', async (req, res) => {
-  const { token } = req.query;
-  try {
-    const user = await User.findOne({ verificationToken: token });
-    if (!user) return res.status(400).send('Invalid or expired verification token');
-
-    user.isVerified = true;
-    user.verificationToken = undefined;
-    await user.save();
-
-    const jwtToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?verified=true&token=${jwtToken}`);
-  } catch (error) {
-    console.error('Verification error:', error);
-    res.status(500).send('Server error during verification');
-  }
-});
-
-// Resend verification email
-router.post('/resend-verification', async (req, res) => {
-  const { email } = req.body;
-  try {
-    const user = await User.findOne({ email });
-    if (!user) return res.status(404).send('User not found');
-    if (user.isVerified) return res.status(400).send('User is already verified');
-
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-    user.verificationToken = verificationToken;
-    await user.save();
-
-    await sendVerificationEmail(email, verificationToken);
-    res.send('Verification email resent');
-  } catch (error) {
-    console.error('Resend verification error:', error);
-    res.status(500).send('Error resending verification email');
-  }
-});
-
 // Upload profile picture and replace existing one if present
-router.post('/profile-picture', upload.single('image'), authMiddleware, async (req, res) => {
+router.post('/profile-picture', upload.single('image'), authMiddleware, attachMongoUser, async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).send('User not found');
@@ -169,8 +78,32 @@ router.post('/profile-picture', upload.single('image'), authMiddleware, async (r
   }
 });
 
+// Upload profile cover image
+router.post("/profile-cover", authMiddleware, attachMongoUser, upload.single("image"), async (req, res) => {
+    try {
+      const userId = req.user.id; // however you store it
+
+      const uploadResult = await cloudinary.uploader.upload(req.file.path, {
+        folder: "ku/profile-covers",
+        transformation: [{ width: 2048, height: 600, crop: "fill" }], // optional
+      });
+
+      const user = await User.findByIdAndUpdate(
+        userId,
+        { profileCover: uploadResult.secure_url },
+        { new: true }
+      );
+
+      res.json({ profileCover: user.profileCover });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to upload cover" });
+    }
+  }
+);
+
 //Update profile page colors
-router.patch('/profile-theme', authMiddleware, async (req, res) => {
+router.patch('/profile-theme', authMiddleware, attachMongoUser, async (req, res) => {
   const { theme } = req.body;
 
   if (!['default', 'dark', 'pastel'].includes(theme)) {
@@ -189,65 +122,123 @@ router.patch('/profile-theme', authMiddleware, async (req, res) => {
 });
 
 // Upload images to cloudinary
-router.post('/gallery', upload.array('images'), authMiddleware, async (req, res) => {
-  console.log('Received gallery upload request');
-  console.log('Files:', req.files); // or req.file depending on multer setup
-  try {
-    const { widths, heights, prices, tags } = req.body;
+router.post(
+  '/gallery',
+  upload.array('images'),
+  authMiddleware,
+  attachMongoUser,
+  async (req, res) => {
+    console.log('Received gallery upload request');
+    console.log('Files:', req.files);
 
-    const widthArray = Array.isArray(widths) ? widths : [widths];
-    const heightArray = Array.isArray(heights) ? heights : [heights];
-    const priceArray = Array.isArray(prices) ? prices : [prices];
-    const tagArray = Array.isArray(tags) ? tags : [tags];
+    try {
+      const { widths, heights, prices, tags, names } = req.body;
 
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).send('User not found');
+      // Helper to normalize single vs multiple values
+      const normalize = (value) =>
+        Array.isArray(value) ? value : value != null ? [value] : [];
 
-    const uploadedImages = await Promise.all(
-      req.files.map(file => cloudinary.uploader.upload(file.path))
-    );
-    
-    // 2) In parallel, shrink each file to a single pixel and read its RGB
+      const widthArray = normalize(widths);
+      const heightArray = normalize(heights);
+      const priceArray = normalize(prices);
+      const tagArray = normalize(tags);
+      const nameArray = normalize(names); // NEW
 
-    const hueValues = await Promise.all(
-      req.files.map(file =>
-        sharp(file.path)
-          .resize(1, 1)        // collapse to one pixel (average color)
-          .raw()               // get raw bytes
-          .toBuffer({ resolveWithObject: true })
-          .then(({ data }) => {
-            const [r, g, b] = data;
-            const { h } = rgbToHsl(r, g, b);
-            return Math.round(h);
-          })
-      )
-    );
+      const user = await User.findById(req.user.id);
+      if (!user) return res.status(404).send('User not found');
 
-    console.log("Hue values: ", hueValues)
-    uploadedImages.forEach((upload, i) => {
-      user.gallery.push({
-        url: upload.secure_url,
-        width: upload.width,                               //parseInt(widthArray[i])
-        height: upload.height,                             //parseInt(heightArray[i]),
-        price: parseFloat(priceArray[i]),
-        artistName: `${user.firstName} ${user.lastName}`,
-        tags: [tagArray[i]],
-        isImportant: false,
-        importantIndex: null,
-        averageHue: hueValues[i]
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).send('No files uploaded');
+      }
+
+      // Basic length check – prevent weird mismatches
+      if (
+        !(
+          req.files.length === priceArray.length &&
+          req.files.length === tagArray.length &&
+          req.files.length === nameArray.length
+        )
+      ) {
+        console.warn('Metadata mismatch', {
+          files: req.files.length,
+          prices: priceArray.length,
+          tags: tagArray.length,
+          names: nameArray.length,
+        });
+        return res
+          .status(400)
+          .send('Mismatched number of files and metadata fields');
+      }
+
+      // 1) Upload all images to Cloudinary
+      const uploadedImages = await Promise.all(
+        req.files.map((file) => cloudinary.uploader.upload(file.path))
+      );
+
+      // 2) Compute hue for each local file (small safety check so sharp
+      //    doesn’t throw ENOENT if a file is missing for some reason)
+      const hueValues = await Promise.all(
+        req.files.map((file) => {
+          if (!fs.existsSync(file.path)) {
+            console.error('File missing on disk for hue calc:', file.path);
+            // Fallback: neutral hue if missing
+            return 0;
+          }
+
+          return sharp(file.path)
+            .resize(1, 1) // collapse to one pixel (average color)
+            .raw()
+            .toBuffer({ resolveWithObject: true })
+            .then(({ data }) => {
+              const [r, g, b] = data;
+              const { h } = rgbToHsl(r, g, b);
+              return Math.round(h);
+            });
+        })
+      );
+
+      console.log('Hue values: ', hueValues);
+
+      uploadedImages.forEach((upload, i) => {
+        const rawTag = tagArray[i];
+        const tagsForPainting = Array.isArray(rawTag)
+          ? rawTag
+          : typeof rawTag === 'string'
+          ? [rawTag]
+          : [];
+
+        const rawName = nameArray[i];
+        const name =
+          rawName && rawName.trim()
+            ? rawName.trim()
+            : `Artwork ${user.gallery.length + i + 1}`;
+
+        user.gallery.push({
+          name, // NEW
+          url: upload.secure_url,
+          width: upload.width,
+          height: upload.height,
+          price: parseFloat(priceArray[i]),
+          artistName: `${user.firstName} ${user.lastName}`,
+          tags: tagsForPainting,
+          isImportant: false,
+          importantIndex: null,
+          averageHue: hueValues[i],
+          dateAdded: new Date(), // NEW (optional; schema default also works)
+        });
       });
-    });
 
-    await user.save();
-    res.status(201).send('Gallery updated!');
-  } catch (error) {
-    console.error('Gallery upload error:', error);
-    res.status(500).send('Failed to upload gallery images');
+      await user.save();
+      res.status(201).send('Gallery updated!');
+    } catch (error) {
+      console.error('Gallery upload error:', error);
+      res.status(500).send('Failed to upload gallery images');
+    }
   }
-});
+);
 
 // Add important tags to Gallery Images
-router.patch('/gallery/important', authMiddleware, async (req, res) => {
+router.patch('/gallery/important', authMiddleware, attachMongoUser, async (req, res) => {
   const { url, isImportant } = req.body;
   if (typeof url !== 'string' || typeof isImportant !== 'boolean') {
     return res.status(400).send('Invalid input');
@@ -278,7 +269,7 @@ router.patch('/gallery/important', authMiddleware, async (req, res) => {
   }
 });
 
-router.delete('/gallery', authMiddleware, async (req, res) => {
+router.delete('/gallery', authMiddleware, attachMongoUser, async (req, res) => {
   try {
     const { images } = req.body;
     if (!images || !Array.isArray(images)) {
